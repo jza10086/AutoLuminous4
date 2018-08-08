@@ -1,0 +1,134 @@
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+// モデルを黒く塗りつぶすエフェクト
+////////////////////////////////////////////////////////////////////////////////////////////////
+#define ALPHA_REF 200
+
+// 座法変換行列
+float4x4 WorldViewProjMatrix      : WORLDVIEWPROJECTION;
+float4x4 WorldViewMatrixInverse : WORLDVIEWINVERSE;
+
+// ビルボード行列
+static float3x3 BillboardMatrix = {
+	normalize(WorldViewMatrixInverse[0].xyz),
+	normalize(WorldViewMatrixInverse[1].xyz),
+	normalize(WorldViewMatrixInverse[2].xyz),
+};
+
+float4 MaterialDiffuse : DIFFUSE  < string Object = "Geometry"; >;
+static float alpha1 = MaterialDiffuse.a;
+
+bool use_texture;  //テクスチャの有無
+
+// オブジェクトのテクスチャ
+texture ObjectTexture: MATERIALTEXTURE;
+sampler ObjTexSampler = sampler_state
+{
+		texture = <ObjectTexture>;
+		MINFILTER = LINEAR;
+		MAGFILTER = LINEAR;
+};
+
+// MMD本来のsamplerを上書きしないための記述です。削除不可。
+sampler MMDSamp0 : register(s0);
+sampler MMDSamp1 : register(s1);
+sampler MMDSamp2 : register(s2);
+
+float Time : CONTROLOBJECT < string name = "Time.x"; string item = "X"; >;
+
+bool DecisionCurtainFireCode(float4 SystemCode){
+		return abs(SystemCode.x - 487) < 0.01;
+}
+
+float2x2 Rotation2x2(float angle){
+	float c = cos(angle);
+	float s = sin(angle);
+	float2x2 mat = {c, s, -s, c};
+	return mat;
+}
+
+float4 TransformPos(MMM_SKINNING_INPUT IN){
+	if(abs(IN.AddUV1.y - 2) < 0.05){
+		IN.Pos.xy = mul(IN.Pos.xy, Rotation2x2(3.141592 * 0.25 * sin(IN.AddUV1.z + IN.AddUV1.w * Time) * (IN.Pos.x > 0 ? 1 : -1)));
+	}
+	else{
+		IN.Pos.xy = mul(IN.Pos.xy, Rotation2x2(IN.AddUV1.z + IN.AddUV1.w * Time));
+	}
+	
+	if(abs(IN.AddUV1.y - 1) < 0.05){
+		IN.Pos.xyz = mul(IN.Pos.xyz, BillboardMatrix);
+	}
+	return MMM_SkinnedPosition(IN.Pos, IN.BlendWeight, IN.BlendIndices, IN.SdefC, IN.SdefR0, IN.SdefR1);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+struct VS_OUTPUT
+{
+		float4 Pos        : POSITION;    // 射影変換座標
+		float2 Tex        : TEXCOORD0;   // テクスチャ
+		float IsCurtainFire     : TEXCOORD1;
+		float4 AddUV2     : TEXCOORD2;
+};
+
+// 頂点シェーダ
+VS_OUTPUT Basic_VS(MMM_SKINNING_INPUT IN)
+{
+		VS_OUTPUT Out = (VS_OUTPUT)0;
+		
+		if(DecisionCurtainFireCode(IN.AddUV1)){
+			Out.Pos = mul( TransformPos(IN), WorldViewProjMatrix );
+			Out.IsCurtainFire = 1;
+		}
+		else
+		{
+			// カメラ視点のワールドビュー射影変換
+			Out.Pos = mul( MMM_SkinnedPosition(IN.Pos, IN.BlendWeight, IN.BlendIndices, IN.SdefC, IN.SdefR0, IN.SdefR1), WorldViewProjMatrix );
+			Out.IsCurtainFire = 0;
+		}
+
+		// テクスチャ座標
+		Out.Tex = IN.Tex;
+		Out.AddUV2 = IN.AddUV2;
+
+		return Out;
+}
+
+float4 Basic_PS( VS_OUTPUT IN ) : COLOR0 {
+		float alpha = MaterialDiffuse.a;
+		if ( use_texture ) alpha *= tex2D( ObjTexSampler, IN.Tex ).a;
+		
+		if(IN.IsCurtainFire > 0)
+		{
+			if(abs(IN.AddUV2.z - 1) < 0.01 && alpha <= ALPHA_REF * rcp(255)) clip(-1);
+			if(abs(IN.AddUV2.z - 2) < 0.01 && length(IN.Tex.xy - float2(0.5, 0.5)) > 0.45 && alpha <= ALPHA_REF * rcp(255)) clip(-1);
+			
+			if(abs(IN.AddUV2.w - 1) < 0.01)
+			{
+				return float4(1, 0, 0, alpha);
+			}
+		}
+		
+		return float4(0, 0, alpha, alpha);
+}
+
+//セルフシャドウなし
+technique Mask < string MMDPass = "object"; > {
+		pass Single_Pass {
+				VertexShader = compile vs_3_0 Basic_VS();
+				PixelShader = compile ps_3_0 Basic_PS();
+		}
+}
+
+//セルフシャドウあり
+technique MaskSS < string MMDPass = "object_ss"; > {
+		pass Single_Pass {
+				VertexShader = compile vs_3_0 Basic_VS();
+				PixelShader = compile ps_3_0 Basic_PS();
+		}
+}
+
+//影や輪郭は描画しない
+technique EdgeTec < string MMDPass = "edge"; > { }
+technique ShadowTec < string MMDPass = "shadow"; > { }
+technique ZplotTec < string MMDPass = "zplot"; > { }
